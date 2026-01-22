@@ -798,10 +798,16 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
                     images=image_parts,
                 )
                 done = bool(review.get("done"))
+                prev_html_body = html_body
+                prev_extra_css = extra_css
                 html_body = str(review.get("html_body", html_body))
                 extra_css = str(review.get("css", extra_css))
                 issues = review.get("issues")
                 changes = review.get("changes")
+                has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
+                if done and (has_edits or issues):
+                    # Require a clean follow-up before honoring done.
+                    done = False
                 if issues:
                     event_queue.put(("issues", {"iteration": i + 1, "issues": issues}))
                 if changes:
@@ -923,7 +929,21 @@ def _continue_worker(
         if pages_dir.exists():
             page_paths = sorted(pages_dir.glob("page_*.png"))
         if not page_paths:
-            raise RuntimeError("Saved pages are missing for continuation")
+            if not html_body or not combined_css:
+                raise RuntimeError("Saved pages are missing for continuation")
+            try:
+                resume_html = assemble_html(html_body, combined_css)
+                resume_html_path = config.workdir / "resume.html"
+                resume_pdf_path = config.workdir / "resume.pdf"
+                resume_pages_dir = config.workdir / "resume_pages"
+                resume_html_path.write_text(resume_html, encoding="utf-8")
+                render_html_to_pdf(resume_html_path, resume_pdf_path, backend=config.backend)
+                page_paths = pdf_to_pngs(resume_pdf_path, resume_pages_dir, zoom=config.zoom)
+                pages_dir = resume_pages_dir
+            except Exception as exc:
+                raise RuntimeError("Failed to rebuild pages for continuation") from exc
+            if not page_paths:
+                raise RuntimeError("Failed to rebuild pages for continuation")
         page_bytes = [path.read_bytes() for path in page_paths]
         base_css = load_base_css()
         font_css = build_font_css(
@@ -971,10 +991,16 @@ def _continue_worker(
                 images=image_parts,
             )
             done = bool(review.get("done"))
+            prev_html_body = html_body
+            prev_extra_css = extra_css
             html_body = str(review.get("html_body", html_body))
             extra_css = str(review.get("css", extra_css))
             issues = review.get("issues")
             changes = review.get("changes")
+            has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
+            if done and (has_edits or issues):
+                # Require a clean follow-up before honoring done.
+                done = False
             if issues:
                 event_queue.put(("issues", {"iteration": i + 1, "issues": issues}))
             if changes:
