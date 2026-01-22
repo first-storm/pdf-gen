@@ -258,7 +258,8 @@ class GeminiClient:
         prompt = (
             "Review the layout based on the requirement and page images. "
             "Return JSON only with keys: html_body, css, issues, changes, done. "
-            "Set done=true if no further revisions are needed. "
+            "Set done=true only if no revisions or issues remain; if you change html_body/css "
+            "or list issues/changes, you must set done=false. "
             "You may adjust page margins using @page in CSS. "
             + self._font_hint()
         )
