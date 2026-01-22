@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Iterable
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
@@ -29,7 +30,18 @@ from .utils import assemble_html, build_font_css, ensure_dir, load_base_css
 
 logger = logging.getLogger(__name__)
 
+CORS_ORIGIN_REGEX = os.getenv("GEMINI_PDF_AGENT_CORS_ORIGIN_REGEX")
+
 app = FastAPI(title="gemini-pdf-agent")
+
+if CORS_ORIGIN_REGEX:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=CORS_ORIGIN_REGEX,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 RESULTS: dict[str, Path] = {}
 STATES: dict[str, Path] = {}
