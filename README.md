@@ -78,7 +78,8 @@ gemini-pdf-agent-server --config /path/to/config.json
     "bucket": "your-bucket",
     "region": "ap-northeast-1",
     "endpoint_url": "https://s3.ap-northeast-1.amazonaws.com",
-    "prefix": "pdf-jobs"
+    "prefix": "pdf-jobs",
+    "public_url_base": "https://your-bucket.s3.ap-northeast-1.amazonaws.com"
   },
   "return_pdf": "url"
 }
@@ -179,6 +180,7 @@ SSE 事件与 `/v1/render` 一致，`start` 事件会额外包含 `resume_from`�
 
 服务在渲染完成后会上传 PDF 到对象存储并清理本地文件（图片上传仅保留本地，不上传到对象存储），state 与文本内容会在 `ttl_seconds` 后删除，并同步删除对象存储内容。
 继续渲染依赖本地保存的页面图；用户上传图片会从本地持久缓存目录读取。
+如需在 `done` 事件里返回对象存储 URL，可在配置里设置 `storage.public_url_base`（例如 `https://<bucket>.s3.<region>.amazonaws.com`），服务会返回 `download_url` 为该 URL。
 
 R2 示例（S3 兼容）：
 

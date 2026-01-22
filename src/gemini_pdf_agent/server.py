@@ -48,6 +48,7 @@ class StorageConfig:
     access_key_id: str | None
     secret_access_key: str | None
     prefix: str
+    public_url_base: str | None
 
 
 @dataclass
@@ -351,6 +352,7 @@ def _storage_from_payload(payload: dict[str, Any], config: dict[str, Any]) -> St
     access_key_id = storage_payload.get("access_key_id") or os.getenv("AWS_ACCESS_KEY_ID")
     secret_access_key = storage_payload.get("secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY")
     prefix = storage_payload.get("prefix") or "gemini-pdf-agent"
+    public_url_base = storage_payload.get("public_url_base")
     return StorageConfig(
         provider=str(provider),
         bucket=str(bucket),
@@ -359,6 +361,7 @@ def _storage_from_payload(payload: dict[str, Any], config: dict[str, Any]) -> St
         access_key_id=str(access_key_id) if access_key_id else None,
         secret_access_key=str(secret_access_key) if secret_access_key else None,
         prefix=str(prefix),
+        public_url_base=str(public_url_base) if public_url_base else None,
     )
 
 
@@ -492,6 +495,9 @@ def _cleanup_expired_jobs_loop() -> None:
                             access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
                             secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
                             prefix=str(storage.get("prefix") or ""),
+                            public_url_base=str(storage.get("public_url_base"))
+                            if storage.get("public_url_base")
+                            else None,
                         )
                         client = _s3_client(storage_config)
                         _s3_delete_prefix(client, storage_config.bucket, str(storage.get("job_prefix")))
@@ -522,6 +528,8 @@ def _build_storage_info(storage: StorageConfig, job_id: str) -> dict[str, Any]:
         job_prefix = f"{prefix}/{job_id}/"
     else:
         job_prefix = f"{job_id}/"
+    result_key = f"{job_prefix}result.pdf"
+    public_url = _build_public_url(storage, result_key)
     return {
         "provider": storage.provider,
         "bucket": storage.bucket,
@@ -529,9 +537,18 @@ def _build_storage_info(storage: StorageConfig, job_id: str) -> dict[str, Any]:
         "endpoint_url": storage.endpoint_url,
         "prefix": storage.prefix,
         "job_prefix": job_prefix,
-        "result_key": f"{job_prefix}result.pdf",
+        "result_key": result_key,
         "state_key": f"{job_prefix}state.json",
+        "public_url_base": storage.public_url_base,
+        "result_url": public_url,
     }
+
+
+def _build_public_url(storage: StorageConfig, key: str) -> str | None:
+    if not storage.public_url_base:
+        return None
+    base = storage.public_url_base.rstrip("/")
+    return f"{base}/{key}"
 
 
 def _upload_and_cleanup(
@@ -563,6 +580,7 @@ def _upload_and_cleanup(
                     "status": "uploaded",
                     "bucket": config.storage.bucket,
                     "result_key": storage_info["result_key"],
+                    "result_url": storage_info.get("result_url"),
                 },
             )
         )
@@ -687,6 +705,9 @@ def _resolve_continue_config(
                 access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
                 secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
                 prefix=str(storage.get("prefix") or ""),
+                public_url_base=str(storage.get("public_url_base"))
+                if storage.get("public_url_base")
+                else None,
             )
     config.resume_from = payload.get("resume_from") or str(state.get("job_id") or "")
     return config
@@ -845,6 +866,8 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
         }
         if storage_info:
             result_payload["storage"] = storage_info
+            if storage_info.get("result_url"):
+                result_payload["download_url"] = storage_info["result_url"]
         if pdf_base64 is not None:
             result_payload["pdf_base64"] = pdf_base64
         STOP_REQUESTS.pop(config.job_id, None)
@@ -1012,6 +1035,8 @@ def _continue_worker(
         }
         if storage_info:
             result_payload["storage"] = storage_info
+            if storage_info.get("result_url"):
+                result_payload["download_url"] = storage_info["result_url"]
         if pdf_base64 is not None:
             result_payload["pdf_base64"] = pdf_base64
         STOP_REQUESTS.pop(config.job_id, None)
@@ -1051,6 +1076,7 @@ def download_result(job_id: str) -> FileResponse:
             access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
             secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
             prefix=str(storage.get("prefix") or ""),
+            public_url_base=str(storage.get("public_url_base")) if storage.get("public_url_base") else None,
         )
         client = _s3_client(storage_config)
         response = client.get_object(Bucket=storage_config.bucket, Key=str(storage.get("result_key")))
@@ -1103,6 +1129,9 @@ async def cleanup_job(request: Request) -> JSONResponse:
                 access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
                 secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
                 prefix=str(storage_state.get("prefix") or ""),
+                public_url_base=str(storage_state.get("public_url_base"))
+                if storage_state.get("public_url_base")
+                else None,
             )
     _cleanup_job(str(job_id), workdir, storage)
     return JSONResponse({"status": "cleaned", "job_id": str(job_id)})
