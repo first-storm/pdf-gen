@@ -5,8 +5,6 @@ services:
     ports:
       - "8290:8000"
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GEMINI_PDF_AGENT_WORKDIR=/app/server_runs
     volumes:
       - ./server_runs:/app/server_runs
