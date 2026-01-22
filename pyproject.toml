@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-pdf-agent"
+version = "0.1.0"
+description = "Generate printable Chinese HTML/CSS via Gemini, render to PDF, and iteratively review with multimodal feedback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = ""}]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+  "google-genai>=0.3.0",
+  "playwright>=1.41.0",
+  "pymupdf>=1.23.0",
+  "pillow>=10.0.0",
+  "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+weasyprint = ["weasyprint>=61.0"]
+
+[project.scripts]
+gemini-pdf-agent = "gemini_pdf_agent.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

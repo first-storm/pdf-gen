@@ -1,0 +1,82 @@
+@page {
+  size: A4;
+  margin: 24mm 20mm 24mm 20mm;
+}
+
+:root {
+  --text-color: #111111;
+  --muted-color: #666666;
+  --border-color: #dddddd;
+  --code-bg: #f6f6f6;
+}
+
+html, body {
+  padding: 0;
+  margin: 0;
+  color: var(--text-color);
+  line-height: 1.6;
+  font-size: 12pt;
+}
+
+body {
+  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.3;
+  margin: 1.2em 0 0.6em;
+}
+
+h1 { font-size: 22pt; }
+h2 { font-size: 18pt; }
+h3 { font-size: 15pt; }
+h4 { font-size: 13pt; }
+
+p {
+  margin: 0 0 0.8em;
+}
+
+ul, ol {
+  padding-left: 1.2em;
+  margin: 0 0 1em;
+}
+
+blockquote {
+  margin: 0.6em 0;
+  padding: 0.6em 0.8em;
+  border-left: 3px solid var(--border-color);
+  color: var(--muted-color);
+}
+
+pre, code {
+  font-family: "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", monospace;
+  background: var(--code-bg);
+  border-radius: 6px;
+}
+
+pre {
+  padding: 0.6em 0.8em;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border: 1px solid var(--border-color);
+}
+
+code {
+  padding: 0.1em 0.25em;
+  border: 1px solid var(--border-color);
+}
+
+img {
+  max-width: 100%;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1em;
+}
+
+.table th, .table td {
+  border: 1px solid var(--border-color);
+  padding: 0.4em 0.6em;
+}
