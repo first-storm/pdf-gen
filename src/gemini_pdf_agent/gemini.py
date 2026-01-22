@@ -130,7 +130,7 @@ class GeminiClient:
             method="POST",
         )
         try:
-            with url_request.urlopen(request, timeout=120) as response:
+            with url_request.urlopen(request, timeout=420) as response:
                 response_data = response.read().decode("utf-8")
         except url_error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
@@ -171,7 +171,8 @@ class GeminiClient:
     ) -> dict[str, Any]:
         prompt = (
             "Review the layout based on the requirement and page images. "
-            "Return JSON only with keys: html_body, css, issues, changes. "
+            "Return JSON only with keys: html_body, css, issues, changes, done. "
+            "Set done=true if no further revisions are needed. "
             + self._font_hint()
         )
         parts = [

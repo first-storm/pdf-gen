@@ -28,6 +28,12 @@ weasyprint = ["weasyprint>=61.0"]
 [project.scripts]
 gemini-pdf-agent = "gemini_pdf_agent.cli:main"
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+gemini_pdf_agent = ["assets/*.css"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]

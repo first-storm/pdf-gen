@@ -48,8 +48,6 @@ gemini-pdf-agent -i --out result.pdf
 # 输入文本后按 Ctrl-D (Windows: Ctrl-Z) 结束
 ```
 
-- 如果已设置 `VISUAL` 或 `EDITOR`，将优先打开编辑器输入（更适合中文输入法），保存并退出后继续执行。
-
 - 直接在命令行输入 prompt：
 
 ```bash
@@ -110,6 +108,7 @@ run_YYYYMMDD_HHMMSS/
 ## 说明
 
 - 默认渲染后端为 Playwright Chromium；如需 WeasyPrint：
+- 模型在迭代评审阶段可返回 `done: true` 提前结束迭代并复用上一次输出。
 
 ```bash
 pip install .[weasyprint]

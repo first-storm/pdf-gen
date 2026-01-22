@@ -3,11 +3,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import shlex
 import shutil
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +23,24 @@ from .config import load_config, save_config
 from .fonts import fontconfig_families
 
 logger = logging.getLogger(__name__)
+
+
+def read_interactive_prompt() -> str:
+    print("Enter prompt text, end with EOF (Ctrl-D/Ctrl-Z):", file=sys.stderr)
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    try:
+        import readline  # noqa: F401
+    except ImportError:
+        pass
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,26 +85,6 @@ def copy_pages(src_dir: Path, dest_dir: Path) -> None:
     ensure_dir(dest_dir)
     for path in src_dir.glob("page_*.png"):
         shutil.copy2(path, dest_dir / path.name)
-
-
-def read_prompt_interactive() -> str:
-    if sys.stdin.isatty():
-        editor = os.getenv("VISUAL") or os.getenv("EDITOR")
-        if editor:
-            tmp_path = None
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp_file:
-                    tmp_path = Path(tmp_file.name)
-                cmd = shlex.split(editor) + [str(tmp_path)]
-                subprocess.run(cmd, check=True)
-                return read_text(tmp_path).strip()
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                logger.warning("Editor failed (%s); falling back to stdin", exc)
-            finally:
-                if tmp_path and tmp_path.exists():
-                    tmp_path.unlink(missing_ok=True)
-    print("Enter prompt text, end with EOF (Ctrl-D/Ctrl-Z):", file=sys.stderr)
-    return sys.stdin.read().strip()
 
 
 def main() -> None:
@@ -139,7 +134,7 @@ def main() -> None:
             raise ValueError("Provide --out when generating PDF")
 
     if args.interactive and not args.prompt_text and not args.prompt:
-        prompt_text = read_prompt_interactive()
+        prompt_text = read_interactive_prompt()
     elif args.prompt_text:
         prompt_text = args.prompt_text
     elif args.prompt:
@@ -178,6 +173,7 @@ def main() -> None:
     combined_css = ""
     page_bytes: list[bytes] = []
     last_report: dict | None = None
+    last_pdf_path: Path | None = None
 
     for i in range(iterations):
         logger.info("Iteration %s/%s", i + 1, iterations)
@@ -188,6 +184,7 @@ def main() -> None:
             extra_css = str(draft.get("extra_css", ""))
         else:
             review = client.review_and_revise(prompt_text, html_body, combined_css, page_bytes)
+            done = bool(review.get("done"))
             html_body = str(review.get("html_body", html_body))
             extra_css = str(review.get("css", extra_css))
             issues = review.get("issues")
@@ -196,6 +193,11 @@ def main() -> None:
                 logger.info("Issues: %s", issues)
             if changes:
                 logger.info("Changes: %s", changes)
+            if done and last_pdf_path is not None:
+                logger.info("Model requested early stop; using previous output.")
+                shutil.copy2(last_pdf_path, out_path)
+                logger.info("Output PDF saved to %s", out_path)
+                return
 
         combined_css = "\n".join([base_css, font_css, extra_css])
         html = assemble_html(html_body, combined_css)
@@ -208,6 +210,7 @@ def main() -> None:
         render_html_to_pdf(html_path, pdf_path, backend=args.backend)
         page_paths = pdf_to_pngs(pdf_path, pages_dir, zoom=args.zoom)
         page_bytes = [path.read_bytes() for path in page_paths]
+        last_pdf_path = pdf_path
 
         if args.init_baseline:
             baseline_dir = Path(args.baseline) if args.baseline else workdir / "baseline"
