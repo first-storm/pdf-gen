@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,9 @@ from .utils import ensure_dir
 
 
 def _config_path() -> Path:
+    override = os.getenv("GEMINI_PDF_AGENT_CONFIG")
+    if override:
+        return Path(override).expanduser().resolve()
     return Path.home() / ".config" / "gemini-pdf-agent" / "config.json"
 
 

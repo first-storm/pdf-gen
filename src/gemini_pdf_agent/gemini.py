@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 import os
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 from urllib import error as url_error
 from urllib import request as url_request
 
@@ -25,22 +25,23 @@ class GeminiClient:
         api_mode: str | None = None,
         temperature: float | None = None,
         reasoning_effort: str | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._api_mode = self._infer_api_mode(api_mode, base_url)
         self._base_url = base_url
-        api_key = self._resolve_api_key()
-        if not api_key:
+        resolved_key = api_key or self._resolve_api_key()
+        if not resolved_key:
             raise RuntimeError(self._missing_key_message())
 
         self._client = None
         if self._api_mode == "gemini":
-            http_options: dict[str, Any] | None = None
+            http_options: types.HttpOptionsDict | None = None
             if base_url:
-                http_options = {"base_url": base_url}
-            self._client = genai.Client(api_key=api_key, http_options=http_options)
+                http_options = cast(types.HttpOptionsDict, {"base_url": base_url})
+            self._client = genai.Client(api_key=resolved_key, http_options=http_options)
         self._model = model
         self._allowed_fonts = [font for font in (allowed_fonts or []) if font]
-        self._api_key = api_key
+        self._api_key = resolved_key
         self._temperature = temperature
         self._reasoning_effort = reasoning_effort
 
@@ -67,14 +68,23 @@ class GeminiClient:
         fonts = ", ".join(self._allowed_fonts)
         return f"Allowed font families: {fonts}. Use only these in CSS."
 
-    def _generate(self, parts: list[types.Part], attempt_repair: bool = True) -> dict[str, Any]:
+    def _generate(
+        self,
+        parts: list[types.Part],
+        attempt_repair: bool = True,
+        repair_attempts: int = 2,
+    ) -> dict[str, Any]:
         if self._api_mode == "openai":
-            return self._generate_openai(parts, attempt_repair=attempt_repair)
+            return self._generate_openai(
+                parts, attempt_repair=attempt_repair, repair_attempts=repair_attempts
+            )
         contents = [types.Content(role="user", parts=parts)]
         config = types.GenerateContentConfig(response_mime_type="application/json")
+        if self._client is None:
+            raise RuntimeError("Gemini client is not initialized")
         response = self._client.models.generate_content(
             model=self._model,
-            contents=contents,
+            contents=cast(types.ContentListUnionDict, contents),
             config=config,
         )
         text = response.text or ""
@@ -84,7 +94,7 @@ class GeminiClient:
             if not attempt_repair:
                 raise
             logger.warning("Invalid JSON from model; requesting repair.")
-            return self._repair_json(parts, text)
+            return self._repair_json(parts, text, repair_attempts=repair_attempts)
 
     def _openai_endpoint(self) -> str:
         if not self._base_url:
@@ -114,6 +124,7 @@ class GeminiClient:
         self,
         parts: list[types.Part],
         attempt_repair: bool = True,
+        repair_attempts: int = 2,
     ) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
         for part in parts:
@@ -165,30 +176,57 @@ class GeminiClient:
             if not attempt_repair:
                 raise
             logger.warning("Invalid JSON from model; requesting repair.")
-            return self._repair_json(parts, text)
+            return self._repair_json(parts, text, repair_attempts=repair_attempts)
 
-    def _repair_json(self, parts: list[types.Part], bad_text: str) -> dict[str, Any]:
+    def _repair_json(
+        self,
+        parts: list[types.Part],
+        bad_text: str,
+        repair_attempts: int = 2,
+    ) -> dict[str, Any]:
         repair_prompt = (
             "The previous response was invalid JSON. "
             "Return ONLY a valid JSON object with the required keys, no extra text."
         )
-        repair_parts = list(parts) + [
-            types.Part.from_text(text=repair_prompt),
-            types.Part.from_text(text="Invalid response:\n" + bad_text),
-        ]
-        if self._api_mode == "openai":
-            return self._generate_openai(repair_parts, attempt_repair=False)
-        contents = [types.Content(role="user", parts=repair_parts)]
-        config = types.GenerateContentConfig(response_mime_type="application/json")
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=contents,
-            config=config,
-        )
-        text = response.text or ""
-        return safe_extract_json(text)
+        last_error: Exception | None = None
+        current_bad = bad_text
+        for _ in range(max(1, repair_attempts)):
+            repair_parts = list(parts) + [
+                types.Part.from_text(text=repair_prompt),
+                types.Part.from_text(text="Invalid response:\n" + current_bad),
+            ]
+            if self._api_mode == "openai":
+                candidate = self._generate_openai(
+                    repair_parts, attempt_repair=False, repair_attempts=0
+                )
+            else:
+                contents = [types.Content(role="user", parts=repair_parts)]
+                config = types.GenerateContentConfig(response_mime_type="application/json")
+                if self._client is None:
+                    raise RuntimeError("Gemini client is not initialized")
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=cast(types.ContentListUnionDict, contents),
+                    config=config,
+                )
+                text = response.text or ""
+                try:
+                    candidate = safe_extract_json(text)
+                except ValueError as exc:
+                    last_error = exc
+                    current_bad = text
+                    continue
+            return candidate
+        if last_error:
+            raise last_error
+        raise ValueError("Invalid JSON content")
 
-    def generate_draft(self, prompt_text: str) -> dict[str, Any]:
+    def generate_draft(
+        self,
+        prompt_text: str,
+        image_context: str | None = None,
+        images: Iterable[tuple[bytes, str]] | None = None,
+    ) -> dict[str, Any]:
         prompt = (
             "You are a layout agent. Generate printable Chinese HTML/CSS. "
             "Return JSON only with keys: html_body, extra_css. "
@@ -199,6 +237,11 @@ class GeminiClient:
             types.Part.from_text(text=prompt),
             types.Part.from_text(text="Requirement:\n" + prompt_text),
         ]
+        if image_context:
+            parts.append(types.Part.from_text(text=image_context))
+        if images:
+            for data, mime_type in images:
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime_type or "image/png"))
         return self._generate(parts)
 
     def review_and_revise(
@@ -207,6 +250,8 @@ class GeminiClient:
         html_body: str,
         css: str,
         page_pngs: Iterable[bytes],
+        image_context: str | None = None,
+        images: Iterable[tuple[bytes, str]] | None = None,
     ) -> dict[str, Any]:
         page_list = list(page_pngs)
         page_count = len(page_list)
@@ -224,6 +269,11 @@ class GeminiClient:
             types.Part.from_text(text="Current CSS:\n" + css),
             types.Part.from_text(text=f"Current page count: {page_count}."),
         ]
+        if image_context:
+            parts.append(types.Part.from_text(text=image_context))
+        if images:
+            for data, mime_type in images:
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime_type or "image/png"))
         for image_bytes in page_list:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
         return self._generate(parts)

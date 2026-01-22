@@ -10,6 +10,7 @@ dist/
 .env
 
 run_*/
+server_runs/
 workdir/
 build
 out.pdf
