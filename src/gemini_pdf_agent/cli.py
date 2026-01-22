@@ -43,6 +43,19 @@ def read_interactive_prompt() -> str:
     return "\n".join(lines).strip()
 
 
+def prompt_continue_after_done() -> tuple[bool, str]:
+    if not sys.stdin.isatty():
+        return True, ""
+    print("Model requested to stop. End iteration? [Y/n]", file=sys.stderr)
+    answer = input().strip().lower()
+    if answer in ("", "y", "yes"):
+        return True, ""
+    print("Add extra prompt (single line, empty to stop):", file=sys.stderr)
+    extra = input().strip()
+    if not extra:
+        return True, ""
+    return False, extra
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gemini PDF agent")
     parser.add_argument("--prompt", help="Prompt text file (UTF-8)")
@@ -194,10 +207,14 @@ def main() -> None:
             if changes:
                 logger.info("Changes: %s", changes)
             if done and last_pdf_path is not None:
-                logger.info("Model requested early stop; using previous output.")
-                shutil.copy2(last_pdf_path, out_path)
-                logger.info("Output PDF saved to %s", out_path)
-                return
+                stop, extra_prompt = prompt_continue_after_done()
+                if stop:
+                    logger.info("Model requested early stop; using previous output.")
+                    shutil.copy2(last_pdf_path, out_path)
+                    logger.info("Output PDF saved to %s", out_path)
+                    return
+                prompt_text = f"{prompt_text}\n\nAdditional request:\n{extra_prompt}"
+                logger.info("Continuing with additional user request.")
 
         combined_css = "\n".join([base_css, font_css, extra_css])
         html = assemble_html(html_body, combined_css)

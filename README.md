@@ -109,6 +109,7 @@ run_YYYYMMDD_HHMMSS/
 
 - 默认渲染后端为 Playwright Chromium；如需 WeasyPrint：
 - 模型在迭代评审阶段可返回 `done: true` 提前结束迭代并复用上一次输出。
+- 当模型请求结束时，程序会询问是否结束；可输入额外提示继续迭代。
 
 ```bash
 pip install .[weasyprint]

@@ -67,9 +67,9 @@ class GeminiClient:
         fonts = ", ".join(self._allowed_fonts)
         return f"Allowed font families: {fonts}. Use only these in CSS."
 
-    def _generate(self, parts: list[types.Part]) -> dict[str, Any]:
+    def _generate(self, parts: list[types.Part], attempt_repair: bool = True) -> dict[str, Any]:
         if self._api_mode == "openai":
-            return self._generate_openai(parts)
+            return self._generate_openai(parts, attempt_repair=attempt_repair)
         contents = [types.Content(role="user", parts=parts)]
         config = types.GenerateContentConfig(response_mime_type="application/json")
         response = self._client.models.generate_content(
@@ -78,7 +78,13 @@ class GeminiClient:
             config=config,
         )
         text = response.text or ""
-        return safe_extract_json(text)
+        try:
+            return safe_extract_json(text)
+        except ValueError:
+            if not attempt_repair:
+                raise
+            logger.warning("Invalid JSON from model; requesting repair.")
+            return self._repair_json(parts, text)
 
     def _openai_endpoint(self) -> str:
         if not self._base_url:
@@ -104,7 +110,11 @@ class GeminiClient:
             }
         return None
 
-    def _generate_openai(self, parts: list[types.Part]) -> dict[str, Any]:
+    def _generate_openai(
+        self,
+        parts: list[types.Part],
+        attempt_repair: bool = True,
+    ) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
         for part in parts:
             content = self._openai_content_from_part(part)
@@ -148,12 +158,41 @@ class GeminiClient:
                 if isinstance(item, dict) and item.get("type") == "text":
                     text_parts.append(str(item.get("text", "")))
             content = "".join(text_parts)
-        return safe_extract_json(str(content))
+        text = str(content)
+        try:
+            return safe_extract_json(text)
+        except ValueError:
+            if not attempt_repair:
+                raise
+            logger.warning("Invalid JSON from model; requesting repair.")
+            return self._repair_json(parts, text)
+
+    def _repair_json(self, parts: list[types.Part], bad_text: str) -> dict[str, Any]:
+        repair_prompt = (
+            "The previous response was invalid JSON. "
+            "Return ONLY a valid JSON object with the required keys, no extra text."
+        )
+        repair_parts = list(parts) + [
+            types.Part.from_text(text=repair_prompt),
+            types.Part.from_text(text="Invalid response:\n" + bad_text),
+        ]
+        if self._api_mode == "openai":
+            return self._generate_openai(repair_parts, attempt_repair=False)
+        contents = [types.Content(role="user", parts=repair_parts)]
+        config = types.GenerateContentConfig(response_mime_type="application/json")
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=contents,
+            config=config,
+        )
+        text = response.text or ""
+        return safe_extract_json(text)
 
     def generate_draft(self, prompt_text: str) -> dict[str, Any]:
         prompt = (
             "You are a layout agent. Generate printable Chinese HTML/CSS. "
             "Return JSON only with keys: html_body, extra_css. "
+            "You may adjust page margins using @page in CSS. "
             + self._font_hint()
         )
         parts = [
@@ -169,10 +208,13 @@ class GeminiClient:
         css: str,
         page_pngs: Iterable[bytes],
     ) -> dict[str, Any]:
+        page_list = list(page_pngs)
+        page_count = len(page_list)
         prompt = (
             "Review the layout based on the requirement and page images. "
             "Return JSON only with keys: html_body, css, issues, changes, done. "
             "Set done=true if no further revisions are needed. "
+            "You may adjust page margins using @page in CSS. "
             + self._font_hint()
         )
         parts = [
@@ -180,7 +222,8 @@ class GeminiClient:
             types.Part.from_text(text="Requirement:\n" + prompt_text),
             types.Part.from_text(text="Current HTML:\n" + html_body),
             types.Part.from_text(text="Current CSS:\n" + css),
+            types.Part.from_text(text=f"Current page count: {page_count}."),
         ]
-        for image_bytes in page_pngs:
+        for image_bytes in page_list:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
         return self._generate(parts)
