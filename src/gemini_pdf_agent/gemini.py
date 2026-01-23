@@ -17,6 +17,15 @@ from .utils import safe_extract_json
 logger = logging.getLogger(__name__)
 
 
+class OpenAIRequestError(RuntimeError):
+    def __init__(self, code: int, reason: str, body: str) -> None:
+        message = f"OpenAI endpoint error: {code} {reason} {body}"
+        super().__init__(message)
+        self.code = code
+        self.reason = reason
+        self.body = body
+
+
 class GeminiClient:
     def __init__(
         self,
@@ -129,26 +138,19 @@ class GeminiClient:
             }
         return None
 
-    def _generate_openai(
-        self,
-        parts: list[types.Part],
-        attempt_repair: bool = True,
-        repair_attempts: int = 2,
-    ) -> dict[str, Any]:
-        contents: list[dict[str, Any]] = []
-        for part in parts:
-            content = self._openai_content_from_part(part)
-            if content:
-                contents.append(content)
+    def _openai_response_format(self) -> dict[str, Any] | None:
+        raw = os.getenv("GEMINI_PDF_AGENT_OPENAI_RESPONSE_FORMAT", "").strip().lower()
+        if raw in {"0", "false", "off", "none"}:
+            return None
+        return {"type": "json_object"}
 
-        payload = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": contents}],
-        }
-        if self._temperature is not None:
-            payload["temperature"] = self._temperature
-        if self._reasoning_effort:
-            payload["reasoning_effort"] = self._reasoning_effort
+    def _openai_response_format_unsupported(self, error: OpenAIRequestError) -> bool:
+        if error.code != 400:
+            return False
+        body = error.body.lower()
+        return "response_format" in body or "response format" in body
+
+    def _openai_request(self, payload: dict[str, Any]) -> str:
         data = json.dumps(payload).encode("utf-8")
         request = url_request.Request(
             self._openai_endpoint(),
@@ -165,7 +167,7 @@ class GeminiClient:
             try:
                 with url_request.urlopen(request, timeout=420) as response:
                     response_data = response.read().decode("utf-8")
-                break
+                return response_data
             except url_error.HTTPError as exc:
                 retryable = exc.code in {429, 500, 502, 503, 504}
                 if retryable and attempt < max_attempts:
@@ -190,7 +192,37 @@ class GeminiClient:
                     time.sleep(delay)
                     continue
                 body = exc.read().decode("utf-8", errors="ignore")
-                raise RuntimeError(f"OpenAI endpoint error: {exc.code} {exc.reason} {body}") from exc
+                raise OpenAIRequestError(exc.code, exc.reason, body) from exc
+        return response_data
+
+    def _openai_generate_text(self, parts: list[types.Part]) -> str:
+        contents: list[dict[str, Any]] = []
+        for part in parts:
+            content = self._openai_content_from_part(part)
+            if content:
+                contents.append(content)
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": contents}],
+        }
+        if self._temperature is not None:
+            payload["temperature"] = self._temperature
+        if self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
+        response_format = self._openai_response_format()
+        if response_format:
+            payload["response_format"] = response_format
+
+        try:
+            response_data = self._openai_request(payload)
+        except OpenAIRequestError as exc:
+            if response_format and self._openai_response_format_unsupported(exc):
+                logger.warning("OpenAI endpoint rejected response_format; retrying without it.")
+                payload.pop("response_format", None)
+                response_data = self._openai_request(payload)
+            else:
+                raise RuntimeError(str(exc)) from exc
 
         raw = json.loads(response_data)
         choices = raw.get("choices") or []
@@ -204,7 +236,15 @@ class GeminiClient:
                 if isinstance(item, dict) and item.get("type") == "text":
                     text_parts.append(str(item.get("text", "")))
             content = "".join(text_parts)
-        text = str(content)
+        return str(content)
+
+    def _generate_openai(
+        self,
+        parts: list[types.Part],
+        attempt_repair: bool = True,
+        repair_attempts: int = 2,
+    ) -> dict[str, Any]:
+        text = self._openai_generate_text(parts)
         try:
             return safe_extract_json(text)
         except ValueError:
@@ -221,7 +261,9 @@ class GeminiClient:
     ) -> dict[str, Any]:
         repair_prompt = (
             "The previous response was invalid JSON. "
-            "Return ONLY a valid JSON object with the required keys, no extra text."
+            "Return ONLY a valid JSON object with the required keys. "
+            "Do not wrap the JSON in markdown or add extra text. "
+            "Use double quotes for keys and string values."
         )
         last_error: Exception | None = None
         current_bad = bad_text
@@ -231,9 +273,13 @@ class GeminiClient:
                 types.Part.from_text(text="Invalid response:\n" + current_bad),
             ]
             if self._api_mode == "openai":
-                candidate = self._generate_openai(
-                    repair_parts, attempt_repair=False, repair_attempts=0
-                )
+                text = self._openai_generate_text(repair_parts)
+                try:
+                    candidate = safe_extract_json(text)
+                except ValueError as exc:
+                    last_error = exc
+                    current_bad = text
+                    continue
             else:
                 contents = [types.Content(role="user", parts=repair_parts)]
                 config = types.GenerateContentConfig(response_mime_type="application/json")
@@ -264,7 +310,9 @@ class GeminiClient:
     ) -> dict[str, Any]:
         prompt = (
             "You are a layout agent. Generate printable Chinese HTML/CSS. "
-            "Return JSON only with keys: html_body, extra_css. "
+            "Return ONLY a valid JSON object with keys: html_body, extra_css. "
+            "Do not wrap the JSON in markdown or add extra text. "
+            "Use double quotes for keys and string values. "
             "You may adjust page margins using @page in CSS. "
             + self._font_hint()
         )
@@ -292,7 +340,9 @@ class GeminiClient:
         page_count = len(page_list)
         prompt = (
             "Review the layout based on the requirement and page images. "
-            "Return JSON only with keys: html_body, css, issues, changes, done. "
+            "Return ONLY a valid JSON object with keys: html_body, css, issues, changes, done. "
+            "Do not wrap the JSON in markdown or add extra text. "
+            "Use double quotes for keys and string values. "
             "Set done=true only if no revisions or issues remain; if you change html_body/css "
             "or list issues/changes, you must set done=false. "
             "You may adjust page margins using @page in CSS. "

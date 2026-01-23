@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -10,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def safe_extract_json(text: str) -> dict[str, Any]:
-    """Extract the outermost JSON object from text.
+    """Extract the first valid JSON object from text.
 
     Raises ValueError if no valid JSON object is found.
     """
@@ -18,21 +17,32 @@ def safe_extract_json(text: str) -> dict[str, Any]:
     if not text:
         raise ValueError("Empty response")
 
-    if text.startswith("{") and text.endswith("}"):
+    decoder = json.JSONDecoder()
+
+    if text.startswith("{"):
         try:
-            return json.loads(text)
+            candidate, _ = decoder.raw_decode(text)
         except json.JSONDecodeError:
-            pass
+            candidate = None
+        else:
+            if isinstance(candidate, dict):
+                return candidate
 
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON object found")
+    start = 0
+    while True:
+        start = text.find("{", start)
+        if start == -1:
+            break
+        try:
+            candidate, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            start += 1
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+        start += 1
 
-    candidate = match.group(0)
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Invalid JSON content") from exc
+    raise ValueError("No JSON object found")
 
 
 def read_text(path: Path) -> str:

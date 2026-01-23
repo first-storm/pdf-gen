@@ -13,6 +13,16 @@ def test_safe_extract_json_wrapped():
     assert data["b"] == 2
 
 
+def test_safe_extract_json_code_block():
+    data = safe_extract_json("```json\n{\"c\": 3}\n```")
+    assert data["c"] == 3
+
+
+def test_safe_extract_json_skips_invalid_braces():
+    data = safe_extract_json("prefix body { color: red; } {\"d\": 4}")
+    assert data["d"] == 4
+
+
 def test_safe_extract_json_invalid():
     with pytest.raises(ValueError):
         safe_extract_json("no json here")
