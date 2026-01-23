@@ -1169,7 +1169,7 @@ def list_fonts() -> JSONResponse:
     return JSONResponse({"fontconfig": fontconfig_families()})
 
 
-@app.get("/v1/results/{job_id}")
+@app.get("/v1/results/{job_id}", response_model=None)
 def download_result(job_id: str) -> FileResponse | StreamingResponse:
     path = RESULTS.get(job_id)
     if not path or not path.exists():
