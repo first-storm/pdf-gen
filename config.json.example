@@ -1,0 +1,24 @@
+{
+  "model": "gemini-2.0-flash",
+  "api_mode": "gemini",
+  "iterations": 2,
+  "backend": "playwright",
+  "zoom": 2.0,
+  "temperature": 1.0,
+  "reasoning_effort": "medium",
+  "allowed_fonts": ["Noto Serif CJK SC"],
+  "font_files": [],
+  "use_fontconfig": true,
+  "max_image_bytes": 5000000,
+  "max_image_count": 10,
+  "ttl_seconds": 600,
+  "storage": {
+    "enabled": false,
+    "provider": "s3",
+    "bucket": "your-bucket",
+    "region": "ap-northeast-1",
+    "endpoint_url": "https://s3.ap-northeast-1.amazonaws.com",
+    "prefix": "pdf-jobs",
+    "public_url_base": "https://your-bucket.s3.ap-northeast-1.amazonaws.com"
+  }
+}

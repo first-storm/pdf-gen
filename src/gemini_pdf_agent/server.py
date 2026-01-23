@@ -196,6 +196,15 @@ def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _dev_logging_enabled() -> bool:
+    return os.getenv("PDGEN_DEV", "").upper() == "TRUE"
+
+
+def _dev_log(message: str, *args: Any) -> None:
+    if _dev_logging_enabled():
+        logger.info(message, *args)
+
+
 def _save_state(
     config: RenderConfig,
     html_body: str,
@@ -448,6 +457,7 @@ def _consume_stop(job_id: str) -> bool:
 
 
 def _cleanup_job(job_id: str, workdir: Path | None, storage: StorageConfig | None) -> None:
+    _dev_log("Cleanup job requested: job_id=%s workdir=%s", job_id, workdir)
     if storage:
         try:
             storage_info = _build_storage_info(storage, job_id)
@@ -500,7 +510,9 @@ def _load_state_for_job(job_id: str) -> tuple[dict[str, Any], Path] | None:
 def _cleanup_expired_jobs_loop() -> None:
     while True:
         try:
-            for state_path in STATE_DIR.glob("*.json"):
+            state_paths = list(STATE_DIR.glob("*.json"))
+            _dev_log("Cleanup scan: %d state file(s).", len(state_paths))
+            for state_path in state_paths:
                 try:
                     state = json.loads(state_path.read_text(encoding="utf-8"))
                 except Exception:
@@ -511,6 +523,7 @@ def _cleanup_expired_jobs_loop() -> None:
                 if _now_utc() < _parse_time(str(expires_at)):
                     continue
                 job_id = state.get("job_id")
+                _dev_log("Cleaning expired job: job_id=%s state=%s", job_id, state_path.name)
                 storage = state.get("storage") or {}
                 if storage and storage.get("bucket") and storage.get("job_prefix"):
                     try:
