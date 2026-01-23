@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterable
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -34,7 +34,15 @@ CORS_ORIGIN_REGEX = os.getenv("GEMINI_PDF_AGENT_CORS_ORIGIN_REGEX")
 
 app = FastAPI(title="gemini-pdf-agent")
 
-if CORS_ORIGIN_REGEX and os.getenv("PDGEN_DEV", "").upper() != "TRUE":
+if os.getenv("PDGEN_DEV", "").upper() == "TRUE":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+elif CORS_ORIGIN_REGEX:
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=CORS_ORIGIN_REGEX,
@@ -1162,7 +1170,7 @@ def list_fonts() -> JSONResponse:
 
 
 @app.get("/v1/results/{job_id}")
-def download_result(job_id: str) -> FileResponse:
+def download_result(job_id: str) -> FileResponse | StreamingResponse:
     path = RESULTS.get(job_id)
     if not path or not path.exists():
         loaded = _load_state_for_job(job_id)
@@ -1254,8 +1262,15 @@ async def render(request: Request) -> StreamingResponse:
         payload_raw = form.get("payload")
         if not payload_raw:
             raise HTTPException(status_code=400, detail="payload is required in form data")
+        payload_raw_value: str | bytes | bytearray
+        if isinstance(payload_raw, UploadFile):
+            payload_raw_value = await payload_raw.read()
+        elif isinstance(payload_raw, (str, bytes, bytearray)):
+            payload_raw_value = payload_raw
+        else:
+            raise HTTPException(status_code=400, detail="payload must be JSON")
         try:
-            payload = json.loads(payload_raw)
+            payload = json.loads(payload_raw_value)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="payload must be JSON") from exc
         font_uploads = list(form.getlist("fonts"))
@@ -1346,8 +1361,15 @@ async def continue_render(request: Request) -> StreamingResponse:
         payload_raw = form.get("payload")
         if not payload_raw:
             raise HTTPException(status_code=400, detail="payload is required in form data")
+        payload_raw_value: str | bytes | bytearray
+        if isinstance(payload_raw, UploadFile):
+            payload_raw_value = await payload_raw.read()
+        elif isinstance(payload_raw, (str, bytes, bytearray)):
+            payload_raw_value = payload_raw
+        else:
+            raise HTTPException(status_code=400, detail="payload must be JSON")
         try:
-            payload = json.loads(payload_raw)
+            payload = json.loads(payload_raw_value)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="payload must be JSON") from exc
         font_uploads = list(form.getlist("fonts"))
