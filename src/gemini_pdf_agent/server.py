@@ -26,7 +26,7 @@ from .fonts import fontconfig_families
 from .gemini import GeminiClient
 from .pdf_inspect import pdf_to_pngs
 from .render import render_html_to_pdf
-from .utils import assemble_html, build_font_css, ensure_dir, load_base_css
+from .utils import apply_css_update, assemble_html, build_font_css, ensure_dir, load_base_css
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +217,7 @@ def _save_state(
     config: RenderConfig,
     html_body: str,
     combined_css: str,
+    extra_css: str,
     pages_dir: Path,
     iteration: int,
     storage_info: dict[str, Any] | None,
@@ -228,6 +229,7 @@ def _save_state(
         "prompt": config.prompt,
         "html_body": html_body,
         "css": combined_css,
+        "extra_css": extra_css,
         "pages_dir": str(pages_dir),
         "iteration": iteration,
         "workdir": str(config.workdir),
@@ -300,6 +302,17 @@ def _deserialize_images(state: dict[str, Any]) -> list[ImageAsset]:
             )
         )
     return images
+
+
+def _extract_extra_css(saved_css: str, base_css: str, font_css: str) -> str:
+    if not saved_css:
+        return ""
+    prefix = "\n".join([base_css, font_css]).rstrip()
+    if prefix:
+        prefix = f"{prefix}\n"
+        if saved_css.startswith(prefix):
+            return saved_css[len(prefix):].lstrip("\n")
+    return saved_css
 
 
 def _image_context(images: list[ImageAsset]) -> str:
@@ -633,6 +646,7 @@ def _upload_and_cleanup(
     images: list[ImageAsset],
     html_body: str,
     combined_css: str,
+    extra_css: str,
     iteration: int,
     event_queue: queue.Queue[tuple[str, dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -642,7 +656,7 @@ def _upload_and_cleanup(
 
     if last_pages_dir is None:
         raise RuntimeError("No pages available for state save")
-    _save_state(config, html_body, combined_css, last_pages_dir, iteration, storage_info)
+    _save_state(config, html_body, combined_css, extra_css, last_pages_dir, iteration, storage_info)
     state_path = _state_path(config.workdir)
 
     if config.storage:
@@ -732,10 +746,17 @@ def _resolve_config(
     if max_image_count is not None and len(images) > max_image_count:
         raise ValueError("Too many images uploaded")
     if workdir_value:
-        workdir = Path(workdir_value)
+        requested = Path(str(workdir_value))
+        safe_name = requested.name
+        if not safe_name:
+            raise ValueError("Invalid workdir")
+        workdir = (WORKDIR_ROOT / safe_name).resolve()
+        root = WORKDIR_ROOT.resolve()
+        if workdir != root and root not in workdir.parents:
+            raise ValueError("Invalid workdir")
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        workdir = WORKDIR_ROOT / f"run_{timestamp}_{job_id}"
+        workdir = (WORKDIR_ROOT / f"run_{timestamp}_{job_id}").resolve()
     return RenderConfig(
         prompt=prompt,
         model=str(model),
@@ -871,9 +892,17 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
                 html_update = review.get("html_body")
                 if html_update is not None and "html_body" in review:
                     html_body = str(html_update)
-                css_update = review.get("css")
-                if css_update is not None and "css" in review:
-                    extra_css = str(css_update)
+                css_update = None
+                if "css" in review:
+                    css_value = review.get("css")
+                    if css_value is not None:
+                        css_update = str(css_value)
+                css_mode = None
+                if "css_mode" in review:
+                    css_mode_value = review.get("css_mode")
+                    if css_mode_value is not None:
+                        css_mode = str(css_mode_value).strip().lower()
+                extra_css = apply_css_update(extra_css, css_update, css_mode)
                 issues = review.get("issues") or []
                 changes = review.get("changes") or []
                 has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
@@ -945,6 +974,7 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
             prepared_images,
             html_body,
             combined_css,
+            extra_css,
             i + 1,
             event_queue,
         )
@@ -1026,6 +1056,10 @@ def _continue_worker(
             allowed_fonts=config.allowed_fonts,
             font_files=config.font_files,
         )
+        extra_css = str(state.get("extra_css", ""))
+        if not extra_css:
+            extra_css = _extract_extra_css(combined_css, base_css, font_css)
+        combined_css = "\n".join([base_css, font_css, extra_css])
         client = GeminiClient(
             model=config.model,
             base_url=config.base_url,
@@ -1041,7 +1075,6 @@ def _continue_worker(
 
         output_pdf_path: Path | None = None
         last_pages_dir: Path | None = None
-        extra_css = ""
         i = 0
         for i in range(config.iterations):
             if _should_stop(config.job_id):
@@ -1071,9 +1104,17 @@ def _continue_worker(
             html_update = review.get("html_body")
             if html_update is not None and "html_body" in review:
                 html_body = str(html_update)
-            css_update = review.get("css")
-            if css_update is not None and "css" in review:
-                extra_css = str(css_update)
+            css_update = None
+            if "css" in review:
+                css_value = review.get("css")
+                if css_value is not None:
+                    css_update = str(css_value)
+            css_mode = None
+            if "css_mode" in review:
+                css_mode_value = review.get("css_mode")
+                if css_mode_value is not None:
+                    css_mode = str(css_mode_value).strip().lower()
+            extra_css = apply_css_update(extra_css, css_update, css_mode)
             issues = review.get("issues") or []
             changes = review.get("changes") or []
             has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
@@ -1141,6 +1182,7 @@ def _continue_worker(
             prepared_images,
             html_body,
             combined_css,
+            extra_css,
             i + 1,
             event_queue,
         )

@@ -13,6 +13,7 @@ from .pdf_inspect import pdf_to_pngs
 from .render import render_html_to_pdf
 from .regression import regression_compare, save_report
 from .utils import (
+    apply_css_update,
     assemble_html,
     build_font_css,
     ensure_dir,
@@ -203,9 +204,17 @@ def main() -> None:
             html_update = review.get("html_body")
             if html_update is not None and "html_body" in review:
                 html_body = str(html_update)
-            css_update = review.get("css")
-            if css_update is not None and "css" in review:
-                extra_css = str(css_update)
+            css_update = None
+            if "css" in review:
+                css_value = review.get("css")
+                if css_value is not None:
+                    css_update = str(css_value)
+            css_mode = None
+            if "css_mode" in review:
+                css_mode_value = review.get("css_mode")
+                if css_mode_value is not None:
+                    css_mode = str(css_mode_value).strip().lower()
+            extra_css = apply_css_update(extra_css, css_update, css_mode)
             issues = review.get("issues") or []
             changes = review.get("changes") or []
             has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css

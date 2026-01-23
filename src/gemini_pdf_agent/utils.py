@@ -124,6 +124,20 @@ def assemble_html(html_body: str, css: str) -> str:
     )
 
 
+def apply_css_update(existing: str, update: str | None, mode: str | None) -> str:
+    if update is None:
+        return existing
+    if mode == "replace":
+        return update
+    addition = update.strip()
+    if not addition:
+        return existing
+    existing_trimmed = existing.rstrip()
+    if not existing_trimmed:
+        return addition
+    return f"{existing_trimmed}\n\n{addition}"
+
+
 def load_base_css() -> str:
     base_css_path = Path(__file__).parent / "assets" / "base.css"
     return read_text(base_css_path)

@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _should_allow_request(url: str, resource_type: str, allow_external_images: bool) -> bool:
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    if scheme in {"file", "data", "blob"} or url.startswith("about:"):
+        return True
+    if allow_external_images and scheme in {"http", "https"} and resource_type == "image":
+        return True
+    return False
 
 
 def render_html_to_pdf(
@@ -29,16 +41,45 @@ def _render_playwright(html_path: Path, pdf_path: Path) -> None:
         ) from exc
 
     html_uri = html_path.resolve().as_uri()
+    allow_network = os.getenv("GEMINI_PDF_AGENT_ALLOW_NETWORK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    allow_external_images = os.getenv("GEMINI_PDF_AGENT_ALLOW_EXTERNAL_IMAGES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    allow_js = os.getenv("GEMINI_PDF_AGENT_ALLOW_JS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page()
+            context = browser.new_context(java_script_enabled=allow_js)
+            if not allow_network:
+                def route_handler(route, request) -> None:
+                    if _should_allow_request(
+                        request.url,
+                        request.resource_type,
+                        allow_external_images,
+                    ):
+                        route.continue_()
+                        return
+                    route.abort()
+
+                context.route("**/*", route_handler)
+            page = context.new_page()
             page.goto(html_uri, wait_until="load")
             page.pdf(
                 path=str(pdf_path),
                 print_background=True,
                 prefer_css_page_size=True,
             )
+            context.close()
             browser.close()
     except Exception as exc:  # pragma: no cover - runtime path
         message = (
