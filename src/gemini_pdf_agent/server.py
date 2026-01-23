@@ -34,7 +34,7 @@ CORS_ORIGIN_REGEX = os.getenv("GEMINI_PDF_AGENT_CORS_ORIGIN_REGEX")
 
 app = FastAPI(title="gemini-pdf-agent")
 
-if CORS_ORIGIN_REGEX:
+if CORS_ORIGIN_REGEX and os.getenv("PDGEN_DEV", "").upper() != "TRUE":
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=CORS_ORIGIN_REGEX,
