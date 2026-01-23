@@ -187,9 +187,9 @@ class GeminiClient:
                 use_response_format = False
             return self._openai_generate_text(parts, use_response_format=use_response_format)
         contents = [types.Content(role="user", parts=parts)]
-        config: types.GenerateContentConfig | None = None
+        config: types.GenerateContentConfigOrDict | None = None
         if self._temperature is not None:
-            config = types.GenerateContentConfig(temperature=self._temperature)
+            config = {"temperature": self._temperature}
         if self._client is None:
             raise RuntimeError("Gemini client is not initialized")
         kwargs: dict[str, Any] = {
@@ -568,6 +568,15 @@ class GeminiClient:
             "- Assume A4 unless the requirement specifies otherwise.\n"
             "- Output raw HTML/CSS without JSON escaping, markdown, or extra commentary.\n"
             "- Do not include placeholder text from the format example.\n"
+            "Default formatting (override if the requirement conflicts):\n"
+            "- Begin with a header block: h1 title, optional subtitle (.doc-subtitle),"
+            " and meta line (.doc-meta).\n"
+            "- Use semantic structure (header, main, section) with a clear h1/h2/h3 hierarchy.\n"
+            "- Prefer short paragraphs and lists; use tables (<table> with <thead>/<tbody>)"
+            " for structured data.\n"
+            "- Add a brief lead paragraph (.lead) when helpful and keep spacing consistent.\n"
+            "- Keep key blocks together; avoid widows/orphans where possible.\n"
+            "- Use serif for body text (e.g. Noto Serif CJK, Times New Roman).\n"
             f"{self._font_hint()}\n"
         )
         prompt = f"{prompt_prefix}{self._draft_output_format(delims)}"
@@ -643,6 +652,15 @@ class GeminiClient:
             "META rules: issues/changes must be arrays of strings; when done=true they must be empty.\n"
             "Output raw HTML/CSS without JSON escaping, markdown, or extra commentary.\n"
             "Do not include placeholder text from the format example.\n"
+            "Default formatting (override if the requirement conflicts):\n"
+            "- Begin with a header block: h1 title, optional subtitle (.doc-subtitle),"
+            " and meta line (.doc-meta).\n"
+            "- Use semantic structure (header, main, section) with a clear h1/h2/h3 hierarchy.\n"
+            "- Prefer short paragraphs and lists; use tables (<table> with <thead>/<tbody>)"
+            " for structured data.\n"
+            "- Add a brief lead paragraph (.lead) when helpful and keep spacing consistent.\n"
+            "- Keep key blocks together; avoid widows/orphans where possible.\n"
+            "- Use serif for body text (e.g. Noto Serif CJK, Times New Roman).\n"
             f"{self._font_hint()}\n"
         )
         prompt = f"{prompt_prefix}{self._review_output_format(delims)}"
