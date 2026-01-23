@@ -7,6 +7,8 @@ COPY src ./src
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-noto-cjk fonts-noto-cjk-extra python3-venv \
+    && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
+    && apt-get install -y --no-install-recommends ttf-mscorefonts-installer \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VIRTUAL_ENV=/opt/venv
