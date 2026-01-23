@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import time
 from typing import Any, Iterable, cast
 from urllib import error as url_error
 from urllib import request as url_request
@@ -44,6 +45,14 @@ class GeminiClient:
         self._api_key = resolved_key
         self._temperature = temperature
         self._reasoning_effort = reasoning_effort
+        self._openai_retries = self._resolve_openai_retries()
+
+    def _resolve_openai_retries(self) -> int:
+        raw = os.getenv("GEMINI_PDF_AGENT_OPENAI_RETRIES", "2")
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 2
 
     def _infer_api_mode(self, api_mode: str | None, base_url: str | None) -> str:
         if api_mode:
@@ -150,12 +159,38 @@ class GeminiClient:
             },
             method="POST",
         )
-        try:
-            with url_request.urlopen(request, timeout=420) as response:
-                response_data = response.read().decode("utf-8")
-        except url_error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"OpenAI endpoint error: {exc.code} {exc.reason} {body}") from exc
+        max_attempts = max(1, 1 + self._openai_retries)
+        response_data = ""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with url_request.urlopen(request, timeout=420) as response:
+                    response_data = response.read().decode("utf-8")
+                break
+            except url_error.HTTPError as exc:
+                retryable = exc.code in {429, 500, 502, 503, 504}
+                if retryable and attempt < max_attempts:
+                    try:
+                        exc.read()
+                    except Exception:
+                        pass
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = 2 ** (attempt - 1)
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except ValueError:
+                            pass
+                    logger.warning(
+                        "OpenAI endpoint error %s; retrying in %.1fs (attempt %s/%s).",
+                        exc.code,
+                        delay,
+                        attempt,
+                        max_attempts,
+                    )
+                    time.sleep(delay)
+                    continue
+                body = exc.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"OpenAI endpoint error: {exc.code} {exc.reason} {body}") from exc
 
         raw = json.loads(response_data)
         choices = raw.get("choices") or []

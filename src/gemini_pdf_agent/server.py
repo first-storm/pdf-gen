@@ -49,6 +49,7 @@ STOP_REQUESTS: dict[str, bool] = {}
 WORKDIR_ROOT = Path(os.getenv("GEMINI_PDF_AGENT_WORKDIR", "server_runs"))
 STATE_DIR = WORKDIR_ROOT / "state"
 _CLEANUP_STARTED = False
+_CLEANUP_LOCK = threading.Lock()
 
 
 @dataclass
@@ -393,6 +394,10 @@ def _s3_upload_file(client, bucket: str, key: str, path: Path) -> None:
     client.upload_file(str(path), bucket, key)
 
 
+def _s3_delete_key(client, bucket: str, key: str) -> None:
+    client.delete_object(Bucket=bucket, Key=key)
+
+
 def _s3_delete_prefix(client, bucket: str, prefix: str) -> None:
     continuation = True
     token: str | None = None
@@ -448,8 +453,18 @@ def _cleanup_job(job_id: str, workdir: Path | None, storage: StorageConfig | Non
             storage_info = _build_storage_info(storage, job_id)
             client = _s3_client(storage)
             _s3_delete_prefix(client, storage.bucket, storage_info["job_prefix"])
-        except Exception:
-            logger.exception("Failed to delete storage objects for job %s", job_id)
+        except Exception as exc:
+            try:
+                from botocore.exceptions import NoCredentialsError
+            except Exception:
+                NoCredentialsError = None  # type: ignore[assignment]
+            if NoCredentialsError and isinstance(exc, NoCredentialsError):
+                logger.warning(
+                    "Skipping S3 cleanup for job %s: AWS credentials not configured.",
+                    job_id,
+                )
+            else:
+                logger.exception("Failed to delete storage objects for job %s", job_id)
     if workdir:
         _cleanup_workdir(workdir)
         state_path = _state_path(workdir)
@@ -513,8 +528,18 @@ def _cleanup_expired_jobs_loop() -> None:
                         )
                         client = _s3_client(storage_config)
                         _s3_delete_prefix(client, storage_config.bucket, str(storage.get("job_prefix")))
-                    except Exception:
-                        logger.exception("Failed to delete S3 objects for job %s", job_id)
+                    except Exception as exc:
+                        try:
+                            from botocore.exceptions import NoCredentialsError
+                        except Exception:
+                            NoCredentialsError = None  # type: ignore[assignment]
+                        if NoCredentialsError and isinstance(exc, NoCredentialsError):
+                            logger.warning(
+                                "Skipping S3 cleanup for job %s: AWS credentials not configured.",
+                                job_id,
+                            )
+                        else:
+                            logger.exception("Failed to delete S3 objects for job %s", job_id)
                 workdir_value = state.get("workdir")
                 if workdir_value:
                     shutil.rmtree(Path(workdir_value), ignore_errors=True)
@@ -532,6 +557,18 @@ def _cleanup_expired_jobs_loop() -> None:
         except Exception:
             logger.exception("Cleanup loop failed")
         time.sleep(60)
+
+
+def _ensure_cleanup_started() -> None:
+    global _CLEANUP_STARTED
+    if _CLEANUP_STARTED:
+        return
+    with _CLEANUP_LOCK:
+        if _CLEANUP_STARTED:
+            return
+        thread = threading.Thread(target=_cleanup_expired_jobs_loop, daemon=True)
+        thread.start()
+        _CLEANUP_STARTED = True
 
 
 def _build_storage_info(storage: StorageConfig, job_id: str) -> dict[str, Any]:
@@ -563,6 +600,11 @@ def _build_public_url(storage: StorageConfig, key: str) -> str | None:
     return f"{base}/{key}"
 
 
+def _with_cache_bust(url: str, token: str) -> str:
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}v={token}"
+
+
 def _upload_and_cleanup(
     config: RenderConfig,
     final_pdf: Path,
@@ -584,6 +626,11 @@ def _upload_and_cleanup(
 
     if config.storage:
         client = _s3_client(config.storage)
+        if config.resume_from:
+            try:
+                _s3_delete_key(client, config.storage.bucket, storage_info["result_key"])
+            except Exception:
+                logger.warning("Failed to delete existing result before upload", exc_info=True)
         _s3_upload_file(client, config.storage.bucket, storage_info["result_key"], final_pdf)
         event_queue.put(
             (
@@ -885,7 +932,10 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
         if storage_info:
             result_payload["storage"] = storage_info
             if storage_info.get("result_url"):
-                result_payload["download_url"] = storage_info["result_url"]
+                result_url = str(storage_info["result_url"])
+                if config.resume_from:
+                    result_url = _with_cache_bust(result_url, str(int(time.time())))
+                result_payload["download_url"] = result_url
         if pdf_base64 is not None:
             result_payload["pdf_base64"] = pdf_base64
         STOP_REQUESTS.pop(config.job_id, None)
@@ -1074,7 +1124,10 @@ def _continue_worker(
         if storage_info:
             result_payload["storage"] = storage_info
             if storage_info.get("result_url"):
-                result_payload["download_url"] = storage_info["result_url"]
+                result_url = str(storage_info["result_url"])
+                if config.resume_from:
+                    result_url = _with_cache_bust(result_url, str(int(time.time())))
+                result_payload["download_url"] = result_url
         if pdf_base64 is not None:
             result_payload["pdf_base64"] = pdf_base64
         STOP_REQUESTS.pop(config.job_id, None)
@@ -1142,6 +1195,7 @@ async def stop_render(request: Request) -> JSONResponse:
 
 @app.post("/v1/cleanup")
 async def cleanup_job(request: Request) -> JSONResponse:
+    _ensure_cleanup_started()
     try:
         payload = await request.json()
     except Exception as exc:
@@ -1177,6 +1231,7 @@ async def cleanup_job(request: Request) -> JSONResponse:
 
 @app.post("/v1/render")
 async def render(request: Request) -> StreamingResponse:
+    _ensure_cleanup_started()
     content_type = request.headers.get("content-type", "")
     payload: dict[str, Any]
     font_uploads: list[Any] = []
@@ -1268,6 +1323,7 @@ async def render(request: Request) -> StreamingResponse:
 
 @app.post("/v1/continue")
 async def continue_render(request: Request) -> StreamingResponse:
+    _ensure_cleanup_started()
     content_type = request.headers.get("content-type", "")
     payload: dict[str, Any]
     font_uploads: list[Any] = []
@@ -1378,13 +1434,9 @@ def _setup_logging() -> None:
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _CLEANUP_STARTED
     ensure_dir(WORKDIR_ROOT)
     ensure_dir(STATE_DIR)
-    if not _CLEANUP_STARTED:
-        thread = threading.Thread(target=_cleanup_expired_jobs_loop, daemon=True)
-        thread.start()
-        _CLEANUP_STARTED = True
+    _ensure_cleanup_started()
 
 
 def main() -> None:
