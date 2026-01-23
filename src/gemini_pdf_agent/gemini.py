@@ -16,6 +16,12 @@ from .utils import safe_extract_json
 
 logger = logging.getLogger(__name__)
 
+_DELIM_OBSERVATIONS = "===OBSERVATIONS==="
+_DELIM_META = "===META==="
+_DELIM_HTML = "===HTML==="
+_DELIM_CSS = "===CSS==="
+_DELIM_END = "===END==="
+
 
 class OpenAIRequestError(RuntimeError):
     def __init__(self, code: int, reason: str, body: str) -> None:
@@ -86,33 +92,239 @@ class GeminiClient:
         fonts = ", ".join(self._allowed_fonts)
         return f"Allowed font families: {fonts}. Use only these in CSS."
 
-    def _generate(
-        self,
-        parts: list[types.Part],
-        attempt_repair: bool = True,
-        repair_attempts: int = 2,
-    ) -> dict[str, Any]:
+    def _draft_output_format(self) -> str:
+        return (
+            "Output format (use exact delimiters; no markdown or extra text):\n"
+            f"{_DELIM_HTML}\n"
+            "[HTML body only]\n"
+            f"{_DELIM_CSS}\n"
+            "[Extra CSS only]\n"
+            f"{_DELIM_END}"
+        )
+
+    def _review_output_format(self) -> str:
+        return (
+            "Output format (use exact delimiters; no markdown or extra text):\n"
+            f"{_DELIM_OBSERVATIONS}\n"
+            "- Brief, visible observations only\n"
+            f"{_DELIM_META}\n"
+            "{\"done\": true, \"issues\": [], \"changes\": []}\n"
+            f"{_DELIM_HTML}\n"
+            "[Full HTML body if changed; omit section if unchanged]\n"
+            f"{_DELIM_CSS}\n"
+            "[Full CSS if changed; omit section if unchanged]\n"
+            f"{_DELIM_END}"
+        )
+
+    def _generate_text(self, parts: list[types.Part]) -> str:
         if self._api_mode == "openai":
-            return self._generate_openai(
-                parts, attempt_repair=attempt_repair, repair_attempts=repair_attempts
-            )
+            return self._openai_generate_text(parts, use_response_format=False)
         contents = [types.Content(role="user", parts=parts)]
-        config = types.GenerateContentConfig(response_mime_type="application/json")
+        config: types.GenerateContentConfig | None = None
+        if self._temperature is not None:
+            config = types.GenerateContentConfig(temperature=self._temperature)
         if self._client is None:
             raise RuntimeError("Gemini client is not initialized")
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=cast(types.ContentListUnionDict, contents),
-            config=config,
-        )
-        text = response.text or ""
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "contents": cast(types.ContentListUnionDict, contents),
+        }
+        if config is not None:
+            kwargs["config"] = config
+        response = self._client.models.generate_content(**kwargs)
+        return response.text or ""
+
+    def _coerce_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return items
+        if isinstance(value, str):
+            item = value.strip()
+            return [item] if item else []
+        return [str(value).strip()]
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return bool(value)
+
+    def _parse_json_fallback(self, text: str) -> dict[str, Any] | None:
         try:
-            return safe_extract_json(text)
+            candidate = safe_extract_json(text)
         except ValueError:
-            if not attempt_repair:
-                raise
-            logger.warning("Invalid JSON from model; requesting repair.")
-            return self._repair_json(parts, text, repair_attempts=repair_attempts)
+            return None
+        if not isinstance(candidate, dict):
+            return None
+        return candidate
+
+    def _parse_draft_response(self, text: str) -> dict[str, Any]:
+        html_start = text.find(_DELIM_HTML)
+        css_start = text.find(_DELIM_CSS)
+        end_start = text.find(_DELIM_END)
+
+        if html_start == -1 or css_start == -1 or end_start == -1:
+            fallback = self._parse_json_fallback(text)
+            if fallback:
+                html_body = str(fallback.get("html_body", ""))
+                extra_css = str(fallback.get("extra_css", fallback.get("css", "")))
+                if not html_body:
+                    raise ValueError("Empty html_body in JSON fallback")
+                return {"html_body": html_body, "extra_css": extra_css}
+            missing = []
+            if html_start == -1:
+                missing.append(_DELIM_HTML)
+            if css_start == -1:
+                missing.append(_DELIM_CSS)
+            if end_start == -1:
+                missing.append(_DELIM_END)
+            raise ValueError(f"Missing delimiters: {', '.join(missing)}")
+
+        if not (html_start < css_start < end_start):
+            raise ValueError("Delimiters out of order; expected HTML -> CSS -> END.")
+
+        html_body = text[html_start + len(_DELIM_HTML) : css_start].strip()
+        extra_css = text[css_start + len(_DELIM_CSS) : end_start].strip()
+        if not html_body:
+            raise ValueError("Empty HTML section")
+        return {"html_body": html_body, "extra_css": extra_css}
+
+    def _parse_review_response(self, text: str) -> dict[str, Any]:
+        meta_start = text.find(_DELIM_META)
+        end_start = text.find(_DELIM_END)
+
+        if meta_start == -1 or end_start == -1 or meta_start > end_start:
+            fallback = self._parse_json_fallback(text)
+            if fallback:
+                result: dict[str, Any] = {
+                    "done": self._coerce_bool(fallback.get("done")),
+                    "issues": self._coerce_list(fallback.get("issues")),
+                    "changes": self._coerce_list(fallback.get("changes")),
+                }
+                if "html_body" in fallback:
+                    result["html_body"] = str(fallback.get("html_body", ""))
+                if "css" in fallback:
+                    result["css"] = str(fallback.get("css", ""))
+                if result["done"] and (
+                    result["issues"]
+                    or result["changes"]
+                    or "html_body" in result
+                    or "css" in result
+                ):
+                    result["done"] = False
+                return result
+            missing = []
+            if meta_start == -1:
+                missing.append(_DELIM_META)
+            if end_start == -1:
+                missing.append(_DELIM_END)
+            raise ValueError(f"Missing delimiters: {', '.join(missing)}")
+
+        html_start = text.find(_DELIM_HTML)
+        css_start = text.find(_DELIM_CSS)
+        if html_start != -1 and html_start > end_start:
+            html_start = -1
+        if css_start != -1 and css_start > end_start:
+            css_start = -1
+
+        if html_start != -1 and html_start < meta_start:
+            raise ValueError("HTML section appears before META")
+        if css_start != -1 and css_start < meta_start:
+            raise ValueError("CSS section appears before META")
+        if html_start != -1 and css_start != -1 and css_start < html_start:
+            raise ValueError("CSS section appears before HTML")
+
+        meta_end_candidates = [end_start]
+        if html_start != -1:
+            meta_end_candidates.append(html_start)
+        if css_start != -1:
+            meta_end_candidates.append(css_start)
+        meta_end = min(pos for pos in meta_end_candidates if pos > meta_start)
+        meta_block = text[meta_start + len(_DELIM_META) : meta_end].strip()
+        if not meta_block:
+            raise ValueError("Empty META section")
+        try:
+            meta = safe_extract_json(meta_block)
+        except ValueError as exc:
+            detail = ""
+            try:
+                json.loads(meta_block)
+            except json.JSONDecodeError as json_exc:
+                detail = f" (line {json_exc.lineno} column {json_exc.colno})"
+            raise ValueError(f"Invalid META JSON{detail}") from exc
+
+        result = {
+            "done": self._coerce_bool(meta.get("done")),
+            "issues": self._coerce_list(meta.get("issues")),
+            "changes": self._coerce_list(meta.get("changes")),
+        }
+
+        if html_start != -1:
+            html_end_candidates = [end_start]
+            if css_start != -1:
+                html_end_candidates.append(css_start)
+            html_end = min(pos for pos in html_end_candidates if pos > html_start)
+            html_body = text[html_start + len(_DELIM_HTML) : html_end].strip()
+            if not html_body:
+                raise ValueError("Empty HTML section")
+            result["html_body"] = html_body
+
+        if css_start != -1:
+            css_body = text[css_start + len(_DELIM_CSS) : end_start].strip()
+            result["css"] = css_body
+
+        if result["done"] and (
+            result["issues"]
+            or result["changes"]
+            or "html_body" in result
+            or "css" in result
+        ):
+            result["done"] = False
+        return result
+
+    def _repair_output(
+        self,
+        parts: list[types.Part],
+        bad_text: str,
+        error_message: str,
+        output_kind: str,
+        repair_attempts: int = 2,
+    ) -> dict[str, Any]:
+        if output_kind == "draft":
+            format_hint = self._draft_output_format()
+        else:
+            format_hint = self._review_output_format()
+        repair_prompt = (
+            "The previous response did not follow the required delimiter format. "
+            f"Error: {error_message}. "
+            "Re-emit the response using ONLY the required format. "
+            "Do not wrap in markdown or add extra text.\n"
+            f"{format_hint}"
+        )
+        last_error: Exception | None = None
+        current_bad = bad_text
+        for _ in range(max(1, repair_attempts)):
+            repair_parts = list(parts) + [
+                types.Part.from_text(text=repair_prompt),
+                types.Part.from_text(text="Invalid response:\n" + current_bad),
+            ]
+            text = self._generate_text(repair_parts)
+            try:
+                if output_kind == "draft":
+                    return self._parse_draft_response(text)
+                return self._parse_review_response(text)
+            except ValueError as exc:
+                last_error = exc
+                current_bad = text
+                continue
+        if last_error:
+            raise last_error
+        raise ValueError("Invalid response format")
 
     def _openai_endpoint(self) -> str:
         if not self._base_url:
@@ -195,7 +407,11 @@ class GeminiClient:
                 raise OpenAIRequestError(exc.code, exc.reason, body) from exc
         return response_data
 
-    def _openai_generate_text(self, parts: list[types.Part]) -> str:
+    def _openai_generate_text(
+        self,
+        parts: list[types.Part],
+        use_response_format: bool = True,
+    ) -> str:
         contents: list[dict[str, Any]] = []
         for part in parts:
             content = self._openai_content_from_part(part)
@@ -210,9 +426,11 @@ class GeminiClient:
             payload["temperature"] = self._temperature
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
-        response_format = self._openai_response_format()
-        if response_format:
-            payload["response_format"] = response_format
+        response_format = None
+        if use_response_format:
+            response_format = self._openai_response_format()
+            if response_format:
+                payload["response_format"] = response_format
 
         try:
             response_data = self._openai_request(payload)
@@ -238,70 +456,6 @@ class GeminiClient:
             content = "".join(text_parts)
         return str(content)
 
-    def _generate_openai(
-        self,
-        parts: list[types.Part],
-        attempt_repair: bool = True,
-        repair_attempts: int = 2,
-    ) -> dict[str, Any]:
-        text = self._openai_generate_text(parts)
-        try:
-            return safe_extract_json(text)
-        except ValueError:
-            if not attempt_repair:
-                raise
-            logger.warning("Invalid JSON from model; requesting repair.")
-            return self._repair_json(parts, text, repair_attempts=repair_attempts)
-
-    def _repair_json(
-        self,
-        parts: list[types.Part],
-        bad_text: str,
-        repair_attempts: int = 2,
-    ) -> dict[str, Any]:
-        repair_prompt = (
-            "The previous response was invalid JSON. "
-            "Return ONLY a valid JSON object with the required keys. "
-            "Do not wrap the JSON in markdown or add extra text. "
-            "Use double quotes for keys and string values."
-        )
-        last_error: Exception | None = None
-        current_bad = bad_text
-        for _ in range(max(1, repair_attempts)):
-            repair_parts = list(parts) + [
-                types.Part.from_text(text=repair_prompt),
-                types.Part.from_text(text="Invalid response:\n" + current_bad),
-            ]
-            if self._api_mode == "openai":
-                text = self._openai_generate_text(repair_parts)
-                try:
-                    candidate = safe_extract_json(text)
-                except ValueError as exc:
-                    last_error = exc
-                    current_bad = text
-                    continue
-            else:
-                contents = [types.Content(role="user", parts=repair_parts)]
-                config = types.GenerateContentConfig(response_mime_type="application/json")
-                if self._client is None:
-                    raise RuntimeError("Gemini client is not initialized")
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=cast(types.ContentListUnionDict, contents),
-                    config=config,
-                )
-                text = response.text or ""
-                try:
-                    candidate = safe_extract_json(text)
-                except ValueError as exc:
-                    last_error = exc
-                    current_bad = text
-                    continue
-            return candidate
-        if last_error:
-            raise last_error
-        raise ValueError("Invalid JSON content")
-
     def generate_draft(
         self,
         prompt_text: str,
@@ -309,12 +463,18 @@ class GeminiClient:
         images: Iterable[tuple[bytes, str]] | None = None,
     ) -> dict[str, Any]:
         prompt = (
-            "You are a layout agent. Generate printable Chinese HTML/CSS. "
-            "Return ONLY a valid JSON object with keys: html_body, extra_css. "
-            "Do not wrap the JSON in markdown or add extra text. "
-            "Use double quotes for keys and string values. "
-            "You may adjust page margins using @page in CSS. "
-            + self._font_hint()
+            "You are a layout agent for generating HTML/CSS optimized for PDF printing.\n"
+            "Goal: Create an HTML body and extra CSS that satisfy the requirement.\n"
+            "Constraints:\n"
+            "- Return only the HTML body (no <html>, <head>, or <body> wrapper).\n"
+            "- Return only additional CSS; base styles already exist.\n"
+            "- Use CSS paged media rules; adjust @page size/margins if needed and avoid"
+            " awkward page breaks with break-inside: avoid for key blocks.\n"
+            "- Assume A4 unless the requirement specifies otherwise.\n"
+            "- Output raw HTML/CSS without JSON escaping, markdown, or extra commentary.\n"
+            "- Do not include placeholder text from the format example.\n"
+            f"{self._font_hint()}\n"
+            f"{self._draft_output_format()}"
         )
         parts = [
             types.Part.from_text(text=prompt),
@@ -325,7 +485,17 @@ class GeminiClient:
         if images:
             for data, mime_type in images:
                 parts.append(types.Part.from_bytes(data=data, mime_type=mime_type or "image/png"))
-        return self._generate(parts)
+        text = self._generate_text(parts)
+        try:
+            return self._parse_draft_response(text)
+        except ValueError as exc:
+            logger.warning("Invalid draft format from model; requesting repair: %s", exc)
+            return self._repair_output(
+                parts,
+                text,
+                str(exc),
+                output_kind="draft",
+            )
 
     def review_and_revise(
         self,
@@ -339,14 +509,23 @@ class GeminiClient:
         page_list = list(page_pngs)
         page_count = len(page_list)
         prompt = (
-            "Review the layout based on the requirement and page images. "
-            "Return ONLY a valid JSON object with keys: html_body, css, issues, changes, done. "
-            "Do not wrap the JSON in markdown or add extra text. "
-            "Use double quotes for keys and string values. "
-            "Set done=true only if no revisions or issues remain; if you change html_body/css "
-            "or list issues/changes, you must set done=false. "
-            "You may adjust page margins using @page in CSS. "
-            + self._font_hint()
+            "Review the layout using the requirement, current HTML/CSS, and page images.\n"
+            "Focus on obvious, visible issues (missing content, overflow, clipping, overlap, "
+            "incorrect ordering, or major spacing problems). If uncertain, say so in observations.\n"
+            "If you make any edits, set done=false.\n"
+            "If no changes are needed, set done=true and omit HTML/CSS sections entirely.\n"
+            "If only one section changes, include only that section; provide full replacements for"
+            " any section you include.\n"
+            "The current CSS shown below includes base styles and fonts; only return extra CSS"
+            " overrides, not the full combined CSS.\n"
+            "Use CSS paged media rules; adjust @page size/margins if needed and avoid awkward page"
+            " breaks with break-inside: avoid for key blocks.\n"
+            "Assume A4 unless the requirement specifies otherwise.\n"
+            "META rules: issues/changes must be arrays of strings; when done=true they must be empty.\n"
+            "Output raw HTML/CSS without JSON escaping, markdown, or extra commentary.\n"
+            "Do not include placeholder text from the format example.\n"
+            f"{self._font_hint()}\n"
+            f"{self._review_output_format()}"
         )
         parts = [
             types.Part.from_text(text=prompt),
@@ -362,4 +541,14 @@ class GeminiClient:
                 parts.append(types.Part.from_bytes(data=data, mime_type=mime_type or "image/png"))
         for image_bytes in page_list:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
-        return self._generate(parts)
+        text = self._generate_text(parts)
+        try:
+            return self._parse_review_response(text)
+        except ValueError as exc:
+            logger.warning("Invalid review format from model; requesting repair: %s", exc)
+            return self._repair_output(
+                parts,
+                text,
+                str(exc),
+                output_kind="review",
+            )

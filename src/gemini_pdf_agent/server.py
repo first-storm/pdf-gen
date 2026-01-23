@@ -868,10 +868,14 @@ def _render_worker(config: RenderConfig, event_queue: queue.Queue[tuple[str, dic
                 done = bool(review.get("done"))
                 prev_html_body = html_body
                 prev_extra_css = extra_css
-                html_body = str(review.get("html_body", html_body))
-                extra_css = str(review.get("css", extra_css))
-                issues = review.get("issues")
-                changes = review.get("changes")
+                html_update = review.get("html_body")
+                if html_update is not None and "html_body" in review:
+                    html_body = str(html_update)
+                css_update = review.get("css")
+                if css_update is not None and "css" in review:
+                    extra_css = str(css_update)
+                issues = review.get("issues") or []
+                changes = review.get("changes") or []
                 has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
                 if done and (has_edits or issues):
                     # Require a clean follow-up before honoring done.
@@ -1064,10 +1068,14 @@ def _continue_worker(
             done = bool(review.get("done"))
             prev_html_body = html_body
             prev_extra_css = extra_css
-            html_body = str(review.get("html_body", html_body))
-            extra_css = str(review.get("css", extra_css))
-            issues = review.get("issues")
-            changes = review.get("changes")
+            html_update = review.get("html_body")
+            if html_update is not None and "html_body" in review:
+                html_body = str(html_update)
+            css_update = review.get("css")
+            if css_update is not None and "css" in review:
+                extra_css = str(css_update)
+            issues = review.get("issues") or []
+            changes = review.get("changes") or []
             has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
             if done and (has_edits or issues):
                 # Require a clean follow-up before honoring done.

@@ -198,10 +198,19 @@ def main() -> None:
         else:
             review = client.review_and_revise(prompt_text, html_body, combined_css, page_bytes)
             done = bool(review.get("done"))
-            html_body = str(review.get("html_body", html_body))
-            extra_css = str(review.get("css", extra_css))
-            issues = review.get("issues")
-            changes = review.get("changes")
+            prev_html_body = html_body
+            prev_extra_css = extra_css
+            html_update = review.get("html_body")
+            if html_update is not None and "html_body" in review:
+                html_body = str(html_update)
+            css_update = review.get("css")
+            if css_update is not None and "css" in review:
+                extra_css = str(css_update)
+            issues = review.get("issues") or []
+            changes = review.get("changes") or []
+            has_edits = bool(changes) or html_body != prev_html_body or extra_css != prev_extra_css
+            if done and (has_edits or issues):
+                done = False
             if issues:
                 logger.info("Issues: %s", issues)
             if changes:
